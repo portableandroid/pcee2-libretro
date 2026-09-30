@@ -52,7 +52,7 @@ if(ANDROID OR WEBOS)
 	set(X11_API OFF)
 	set(WAYLAND_API OFF)
 	set(USE_BACKTRACE OFF)
-	if(ANDROID)
+	if(ANDROID AND NOT PORTANDROID)
 		# The core renders through the frontend's Vulkan context, so the GL
 		# renderer - which would want an EGL surface of its own - is off as
 		# well. webOS keeps it: there is no Vulkan loader on the device, and
