@@ -7,24 +7,29 @@ if(PORTANDROID)
 
 	# add include directories
 	include_directories(${import_libs_DIR}/classicboy/include
-			${import_libs_DIR}/libBlocksRuntime/include
-			${import_libs_DIR}/libcpufeatures/include
-			${import_libs_DIR}/libemuCore/include
-			${import_libs_DIR}/libemuRetro/include
-			${import_libs_DIR}/libfex/include
-			${import_libs_DIR}/libpng/include
-			${import_libs_DIR}/libzip/include)
+		${import_libs_DIR}/libBlocksRuntime/include
+		${import_libs_DIR}/libcpufeatures/include
+		${import_libs_DIR}/libemuCore/include
+		${import_libs_DIR}/libemuRetro/include
+		${import_libs_DIR}/libfex/include
+		${import_libs_DIR}/libpng/include
+		${import_libs_DIR}/libzip/include)
 
 	# added imported libraries
 	add_library(lib_emuCore STATIC IMPORTED)
 	set_target_properties(lib_emuCore PROPERTIES IMPORTED_LOCATION
-			${import_libs_DIR}/libemuCore/${CFG_BUILD_TYPE}/${ANDROID_ABI}/libemuCore.a)
+		${import_libs_DIR}/libemuCore/${CFG_BUILD_TYPE}/${ANDROID_ABI}/libemuCore.a)
 
 	# added imported libraries
 	add_library(lib_emuRetro STATIC IMPORTED)
 	set_target_properties(lib_emuRetro PROPERTIES IMPORTED_LOCATION
-			${import_libs_DIR}/libemuRetro/${CFG_BUILD_TYPE}/${ANDROID_ABI}/libemuRetro.a)
-	add_library(pcee2_libretro SHARED ${main_entry_source})
+		${import_libs_DIR}/libemuRetro/${CFG_BUILD_TYPE}/${ANDROID_ABI}/libemuRetro.a)
+
+	add_library(pcee2_libretro SHARED
+		Libretro.cpp
+		LibretroVFS.cpp
+		${main_entry_source}
+	)
 else()
 	add_library(pcee2_libretro SHARED)
 
@@ -34,29 +39,30 @@ else()
 		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 		LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 	)
+
+	if (PACKAGE_MODE)
+		install(TARGETS pcee2_libretro DESTINATION ${CMAKE_INSTALL_LIBDIR})
+	else()
+		install(TARGETS pcee2_libretro DESTINATION ${CMAKE_SOURCE_DIR}/bin)
+	endif()
+
+	# The libretro buildbot expects the .so directly in the build dir root (it does
+	# `mv $BUILD_DIR/pcee2_libretro.so ...`), while the GitHub/standalone packaging
+	# uses bin/. Copy it to the build root too so both layouts work.
+	add_custom_command(TARGET pcee2_libretro POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy
+			$<TARGET_FILE:pcee2_libretro> ${CMAKE_BINARY_DIR}/pcee2_libretro.so)
+
+	target_sources(pcee2_libretro PRIVATE
+		${main_entry_source}
+		Libretro.cpp
+		LibretroVFS.cpp
+		LibretroVFS.h
+		libretro.h
+		libretro_core_options.h
+		libretro_core_options_intl.h
+	)
 endif()
-
-if (PACKAGE_MODE)
-	install(TARGETS pcee2_libretro DESTINATION ${CMAKE_INSTALL_LIBDIR})
-else()
-	install(TARGETS pcee2_libretro DESTINATION ${CMAKE_SOURCE_DIR}/bin)
-endif()
-
-# The libretro buildbot expects the .so directly in the build dir root (it does
-# `mv $BUILD_DIR/pcee2_libretro.so ...`), while the GitHub/standalone packaging
-# uses bin/. Copy it to the build root too so both layouts work.
-add_custom_command(TARGET pcee2_libretro POST_BUILD
-	COMMAND ${CMAKE_COMMAND} -E copy
-		$<TARGET_FILE:pcee2_libretro> ${CMAKE_BINARY_DIR}/pcee2_libretro.so)
-
-target_sources(pcee2_libretro PRIVATE
-	Libretro.cpp
-	LibretroVFS.cpp
-	LibretroVFS.h
-	libretro.h
-	libretro_core_options.h
-	libretro_core_options_intl.h
-)
 
 target_include_directories(pcee2_libretro PRIVATE
 	"${CMAKE_CURRENT_SOURCE_DIR}"
@@ -74,7 +80,7 @@ if(PORTANDROID)
 			PCSX2
 	)
 
-	set_target_properties(pcee2_libretro PROPERTIES OUTPUT_NAME "libcore_${CFG_MODULE_NAME}")
+	set_target_properties(pcee2_libretro PROPERTIES OUTPUT_NAME "core_${CFG_MODULE_NAME}")
 	set_target_properties(pcee2_libretro
 			PROPERTIES
 			LIBRARY_OUTPUT_DIRECTORY
