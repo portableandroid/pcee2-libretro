@@ -90,6 +90,11 @@
 
 #include "fmt/format.h"
 
+#ifdef PORTANDROID
+#define _cb_type_lock_
+#include "emu_retro.h"
+#endif
+
 namespace LibretroHost
 {
 	// libretro callbacks
@@ -636,7 +641,12 @@ void LibretroHost::SettingsOverride()
 	// size, the frontend can compress its state files itself
 	s_settings_interface.SetIntValue("EmuCore", "SavestateCompressionType",
 		static_cast<int>(SavestateCompressionMethod::Uncompressed));
-
+#ifdef PORTANDROID
+    if (cb_settings.bios_path != nullptr && s_settings_interface.GetStringValue("Filenames", "BIOS").empty()) {
+		EmuFolders::Bios = cb_settings.bios_dir;
+		s_settings_interface.SetStringValue("Filenames", "BIOS", cb_settings.bios_name);
+    }
+#endif
 	// pick the first valid BIOS image from <system>/pcsx2/bios if none is configured
 	if (s_settings_interface.GetStringValue("Filenames", "BIOS").empty())
 	{
