@@ -646,6 +646,9 @@ void LibretroHost::SettingsOverride()
 		EmuFolders::Bios = cb_settings.bios_dir;
 		s_settings_interface.SetStringValue("Filenames", "BIOS", cb_settings.bios_name);
     }
+
+	// reset memory card directory to core internal state dir
+	EmuFolders::MemoryCards = cb_itf.cb_dir_get(CB_DIR_STATE);
 #endif
 	// pick the first valid BIOS image from <system>/pcsx2/bios if none is configured
 	if (s_settings_interface.GetStringValue("Filenames", "BIOS").empty())
