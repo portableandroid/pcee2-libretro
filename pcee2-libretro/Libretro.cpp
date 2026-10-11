@@ -468,6 +468,18 @@ static void ShutdownCoreAtExit()
 			s_exit_requested = true;
 		}
 		s_session_cv.notify_all();
+
+		// An active session may be parked waiting for the frontend's next
+		// run token. At process exit, no further retro_run() call will arrive.
+		// Break the pacing handshake before joining, as retro_deinit() does.
+		s_running.store(false, std::memory_order_release);
+		if (VMManager::HasValidVM())
+			VMManager::SetState(VMState::Stopping);
+		{
+			std::unique_lock lock(s_frame_mutex);
+			s_run_token = true;
+		}
+		s_frame_cv.notify_all();
 		s_cpu_thread.join();
 	}
 
@@ -1229,6 +1241,8 @@ static const VkApplicationInfo* GetVulkanApplicationInfo(void)
 	return &app_info;
 }
 
+static bool OpenGSOnNegotiatedDevice(retro_vulkan_context* context);
+
 static bool CreateVulkanDevice(retro_vulkan_context* context, VkInstance instance, VkPhysicalDevice gpu,
 	VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr, const char** required_device_extensions,
 	unsigned num_required_device_extensions, const char** required_device_layers,
@@ -1242,7 +1256,36 @@ static bool CreateVulkanDevice(retro_vulkan_context* context, VkInstance instanc
 	VKLibretro::Init.required_device_layers = required_device_layers;
 	VKLibretro::Init.num_required_device_layers = num_required_device_layers;
 	VKLibretro::Init.required_features = required_features;
+	VKLibretro::Init.create_device_wrapper = nullptr;
+	VKLibretro::Init.create_device_opaque = nullptr;
+	return OpenGSOnNegotiatedDevice(context);
+}
 
+// v2: the frontend creates the device itself, through the wrapper, from the
+// create info GSDeviceVK builds. Preferred by a frontend that has it (Craig).
+static bool CreateVulkanDevice2(retro_vulkan_context* context, VkInstance instance, VkPhysicalDevice gpu,
+	VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+	retro_vulkan_create_device_wrapper_t create_device_wrapper, void* opaque)
+{
+	VKLibretro::Init.instance = instance;
+	VKLibretro::Init.gpu = gpu;
+	VKLibretro::Init.get_instance_proc_addr = get_instance_proc_addr;
+	VKLibretro::Init.required_device_extensions = nullptr;
+	VKLibretro::Init.num_required_device_extensions = 0;
+	VKLibretro::Init.required_device_layers = nullptr;
+	VKLibretro::Init.num_required_device_layers = 0;
+	VKLibretro::Init.required_features = nullptr;
+	VKLibretro::Init.create_device_wrapper = create_device_wrapper;
+	VKLibretro::Init.create_device_opaque = opaque;
+	const bool ok = OpenGSOnNegotiatedDevice(context);
+	// The wrapper is only valid inside this call.
+	VKLibretro::Init.create_device_wrapper = nullptr;
+	VKLibretro::Init.create_device_opaque = nullptr;
+	return ok;
+}
+
+static bool OpenGSOnNegotiatedDevice(retro_vulkan_context* context)
+{
 	// Bring up the GS thread now: GSDeviceVK adopts Init.instance/gpu and the
 	// wrapped vkCreateDevice fills Init.device with the shared device.
 	if (!MTGS::IsOpen() && !MTGS::WaitForOpen())
@@ -1492,6 +1535,10 @@ void retro_init(void)
 	}
 
 	Log::SetHostOutputLevel(LOGLEVEL_INFO, &HostLogCallback);
+
+	// The upstream PCSX2 version and the commit of this repository the core was
+	// built from, so a tester's log says which build it came from
+	Console.WriteLnFmt("pcee2 libretro core {}, built from commit {:.9}", GIT_REV, GIT_HASH);
 
 	LogVFSStatus();
 }
@@ -2002,13 +2049,25 @@ bool retro_load_game(const struct retro_game_info* game)
 		}
 		else
 		{
-			static const struct retro_hw_render_context_negotiation_interface_vulkan neg_iface = {
-				RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN,
-				RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION,
-				GetVulkanApplicationInfo,
-				CreateVulkanDevice,
-				nullptr, // destroy_device
-			};
+			// v2 where the frontend has it: create_device2, with the frontend's
+			// device wrapper. A frontend that only knows v1 is told version 1,
+			// and calls create_device. create_instance stays null either way,
+			// so the frontend makes the instance, as it always did here.
+			struct retro_hw_render_context_negotiation_interface support = {
+				RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN, 0};
+			unsigned version = 1;
+			if (s_environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT, &support) &&
+				support.interface_version >= 2)
+				version = 2;
+			static struct retro_hw_render_context_negotiation_interface_vulkan neg_iface = {};
+			neg_iface.interface_type = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN;
+			neg_iface.interface_version = version;
+			neg_iface.get_application_info = GetVulkanApplicationInfo;
+			neg_iface.create_device = CreateVulkanDevice;
+			neg_iface.destroy_device = nullptr;
+			neg_iface.create_instance = nullptr;
+			neg_iface.create_device2 = version >= 2 ? CreateVulkanDevice2 : nullptr;
+			Console.WriteLn("Vulkan context negotiation interface v%u", version);
 			s_environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE, (void*)&neg_iface);
 
 			Error vk_error;
@@ -2390,6 +2449,19 @@ static void RETRO_CALLCONV AudioBufferStatus(bool active, unsigned occupancy, bo
 	s_audio_occupancy.store(occupancy, std::memory_order_release);
 }
 
+// Whether, with the frontend pacing, its audio buffer is too full for this
+// retro_run() to emulate a frame (see retro_run).
+static bool FrontendAheadOfAudio()
+{
+	if (s_internal_limiter.load(std::memory_order_acquire) ||
+		!s_audio_status_known.load(std::memory_order_acquire) ||
+		s_audio_occupancy.load(std::memory_order_acquire) < 90)
+		return false;
+
+	bool fast_forward = false;
+	return !(s_environ_cb && s_environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fast_forward) && fast_forward);
+}
+
 static void OutputAudio(bool pad_when_empty = true)
 {
 	// Leave the frontend alone while its buffer is nearly full: what it does
@@ -2683,9 +2755,22 @@ void retro_run(void)
 	// What holds the speed to 100% is the frontend blocking on the audio it is
 	// handed, the same as it already is for this core - nothing here limits by
 	// wall clock, and SettingsOverride() turns the VM's own limiter off.
+	// That blocking is also why the frontend may not run a frame here at all.
+	// OutputAudio() never writes into a nearly full buffer, because on some
+	// drivers the write then blocks for good - but that also takes away the
+	// block that holds the speed. On a display faster than the game,
+	// RetroArch calls retro_run() once per refresh, and every call ran a
+	// frame: three times too fast at 180Hz, and a 30fps game kept rushing
+	// ahead between its own frames (issue #44). So while the frontend's audio
+	// buffer is that full, this call only repeats the last image and the
+	// audio catches up; the speed is then held by the audio playing, as the
+	// block would have held it. Not while fast-forwarding, where a full
+	// buffer is the point.
+	const bool audio_ahead = FrontendAheadOfAudio();
+
 	std::unique_lock lock(s_frame_mutex);
 	bool got_frame = false;
-	for (u32 run = 0;; run++)
+	for (u32 run = 0; !audio_ahead; run++)
 	{
 		s_run_token = true;
 		s_frame_cv.notify_all();

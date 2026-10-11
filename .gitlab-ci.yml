@@ -178,11 +178,15 @@ libretro-build-linux-x64:
   # real breakage still fails three times.
   retry: 2
   # And if it does fail all three, leave something readable behind: traces here
-  # need an account, artifacts do not.
+  # need an account, artifacts do not. This replaces the template's artifacts
+  # rather than adding to them, so the core is listed again: without $LIBNAME
+  # the job went green and uploaded only the log, and the buildbot, which
+  # deploys what the job uploads, kept the Linux x64 nightly of 23 Aug (#43).
   artifacts:
     when: always
     expire_in: 1 week
     paths:
+      - $LIBNAME
       - ci-linux-debug.log
   before_script:
     - |
@@ -431,6 +435,10 @@ libretro-build-android-x86_64:
 # first pipeline is the first time this toolchain has seen the tree.
 libretro-build-webos-aarch64:
   allow_failure: true
+  # Its deps are not cached yet, so it clones shaderc's third_party from GitHub,
+  # which turned the runner's anonymous clones away on 6 Oct ("could not read
+  # Username for 'https://github.com'"), as it did rpcs3's the day before.
+  retry: 2
   extends:
     - .libretro-webos-aarch64-cmake
     - .core-defs
